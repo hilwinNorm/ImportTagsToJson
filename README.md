@@ -96,6 +96,6 @@ Saved: C:\Example\Path\To\Program\battle_states_effect_0.02k.json
 
 3. MyTags GitHub Repository: https://github.com/light8227/yw-stuff/tree/master
 
-## Credits
+# Credits
 
-Thanks to YW Modding Zone for providing MyTags.txt file
+Thanks to YW Modding Zone for providing `MyTags.txt` file
