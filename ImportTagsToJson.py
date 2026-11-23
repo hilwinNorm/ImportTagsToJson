@@ -231,8 +231,17 @@ def build_value_map(values, schema, map_value=False):
         )
         
     if map_value:
-        if not mapped.get(map_value, False): return None, None
-        return mapped[map_value], mapped
+        if map_value in mapped:
+            return mapped[map_value], mapped
+
+        # Tolerate repr-escaped input like 'SteffID?\\Num' where the
+        # real key is 'SteffID?\Num'. Only applies if collapsing the
+        # doubled backslashes actually hits a real field.
+        unescaped = map_value.replace("\\\\", "\\")
+        if unescaped != map_value and unescaped in mapped:
+            return mapped[unescaped], mapped
+
+        return None, None
     return mapped
 
 def incorrect_value_name_exception(values, schema, key_value):
@@ -243,90 +252,189 @@ def incorrect_value_name_exception(values, schema, key_value):
         current_attempt = user_input
         map_id, data_map = build_value_map(values, schema, current_attempt)
         if map_id is not None: return map_id, data_map, current_attempt
-            
+        
+def configure_key_by_value(item_name, data_map):
+    """Choose a field to use as the key for a named hash map.
+
+    Returns the selected field name, or None when the user wants a list.
+    """
+    field_dump = "\n".join(
+        f"    {name} = {value!r}"
+        for name, value in data_map.items()
+    )
+
+    while True:
+        key_by_value = input(f"""
+Preview of first {item_name} entry:
+{field_dump}
+
+Use one of these fields as the dictionary key?
+(Write a field name, e.g. MapName, or press Enter to use an array)
+Input: """).strip()
+
+        if not key_by_value:
+            return None
+
+        if key_by_value not in data_map:
+            print(f"'{key_by_value}' is not a field in {item_name}. Try again.")
+            continue
+
+        if data_map[key_by_value] is None:
+            print(f"'{key_by_value}' is empty in the preview entry. Choose another field.")
+            continue
+
+        return key_by_value
+
+
 def iterate_through_json_data(json_data):
     json_map = {}
     json_map_entry = None
     schema_dict = {}
-    key_by_value = False
-    key_index = 0
-    dup = 0 # If we find entry with same name, using this to distinguish them
-    entry_len = {"item_name": '', "original": 0, "actual": 0}
-    
+    key_fields = {}
+    active_key_field = None
+    entry_len = {"item_name": "", "original": 0, "actual": 0}
+
     for index, item in enumerate(json_data):
         item_name = item.get("Name")
-        if ("_END" in item_name or "_LIST_BEG" in item_name or "_BEGIN" in item_name) == False:
-            # Load data
-                
+        if not item_name:
+            continue
+
+        is_end_marker = item_name.endswith("_END")
+        is_begin_marker = (
+            item_name.endswith("_BEGIN")
+            or item_name.endswith("_LIST_BEG")
+        )
+
+        if not is_end_marker and not is_begin_marker:
+            # Load data from an ordinary entry.
             values = [entry.get("Value") for entry in item.get("Values", [])]
-                
-            # Mapping schema to values
-            if key_by_value:
-                map_id, data_map = build_value_map(values, schema_dict[item_name], key_by_value)
-                
-                # If user wrote incorrect value name:
+
+            if item_name not in schema_dict:
+                schema_dict[item_name] = load_schema(
+                    MYTAGS_PATH, item_name, CONFIG["GAME_MARKER"]
+                )
+
+            data_schema = schema_dict[item_name]
+
+            if active_key_field:
+                map_id, data_map = build_value_map(
+                    values, data_schema, active_key_field
+                )
+
+                # If the selected field is missing in this entry, let the
+                # user select a replacement field instead of crashing.
                 if map_id is None:
-                    map_id, data_map, key_by_value = (incorrect_value_name_exception(values, schema_dict[item_name], key_by_value))
-                    if map_id is None: return False
+                    map_id, data_map, active_key_field = incorrect_value_name_exception(
+                        values, data_schema, active_key_field
+                    )
+                    if map_id is None:
+                        return False
+
+                if map_id in json_map_entry:
+                    return print(
+                        f"Duplicate key {map_id!r} in {entry_len['item_name']}. "
+                        f"Choose a field whose values are unique."
+                    )
+
                 json_map_entry[map_id] = data_map
             else:
-                data_map = build_value_map(values, schema_dict[item_name])
+                data_map = build_value_map(values, data_schema)
                 json_map_entry.append(data_map)
-            entry_len["actual"]+=1
-        else:
-            if "_END" in item_name: continue
-            item_name = item_name.replace("_BEGIN",'').replace("_LIST_BEG",'')
 
-            if entry_len["original"] != entry_len["actual"]: 
-                return print (f"{json_map_entry} length: {entry_len['actual']}\ndoes not match json length: {entry_len['original']}")
-            entry_len = {"item_name": item_name, "original": item['Values'][0]['Value'], "actual": 0}
-            
-            dup=0
-            if not schema_dict.get(item_name, False):
-                # loading schema if it's encountered for the first time
-                data_schema = load_schema(MYTAGS_PATH, item_name, CONFIG["GAME_MARKER"])
-                schema_dict[item_name] = data_schema
-                '''
-                val_len = len(values)
-                schm_len = len(data_schema)
-                
-                print(f"""
-                {item_name} schema: {schm_len} fields
-                {item_name} records: {val_len}
-                """)
-                if schm_len != val_len:
-                    raise ValueError(
-                        f"A {item_name} record does not match the MyTags schema: "
-                        f"{val_len} values vs {schm_len} fields."
+            entry_len["actual"] += 1
+            continue
+
+        # Before moving to the next block (or closing the current block),
+        # make sure its declared ChildCount matches the number of records.
+        if entry_len["original"] != entry_len["actual"]:
+            print(
+                f"{entry_len['item_name']} length: {entry_len['actual']}\n"
+                f"does not match json length: {entry_len['original']}"
+            )
+            return None
+
+        if is_end_marker:
+            continue
+
+        # Start a new block.
+        original_count = 0
+        marker_values = item.get("Values", [])
+        if marker_values:
+            original_count = marker_values[0].get("Value", 0)
+
+        entry_len = {
+            "item_name": item_name,
+            "original": original_count,
+            "actual": 0,
+        }
+
+        if item_name not in key_fields:
+            # Load the marker schema the first time this block appears.
+            marker_schema = load_schema(
+                MYTAGS_PATH, item_name, CONFIG["GAME_MARKER"]
+            )
+            schema_dict[item_name] = marker_schema
+            active_key_field = None
+
+            # Most list-like blocks contain only ChildCount. The actual
+            # record schema is the name of the next ordinary entry.
+            if (
+                len(marker_schema) == 1
+                and marker_schema[0]["name"] == "ChildCount"
+            ):
+                next_item = next(
+                    (
+                        candidate
+                        for candidate in json_data[index + 1:]
+                        if candidate.get("Name")
+                        and not candidate["Name"].endswith("_END")
+                        and not candidate["Name"].endswith("_BEGIN")
+                        and not candidate["Name"].endswith("_LIST_BEG")
+                    ),
+                    None,
+                )
+
+                if next_item is not None:
+                    next_item_name = next_item["Name"]
+                    data_schema = load_schema(
+                        MYTAGS_PATH, next_item_name, CONFIG["GAME_MARKER"]
                     )
-                '''
-                # cfg.bin files can either be stored as array
-                # either as hash maps
-                
-                next_index = index + 1
-                if next_index < len(json_data):
-                    next_item = json_data[next_index]
-                    values = [entry.get("Value") for entry in next_item.get("Values", [])]
-                    data_map = build_value_map(values, schema_dict[item_name])
-                else: next_item = None
-                if next_item:
-                    key_by_value = input(f"{data_map}\nMap {item_name} schema by value?\n(Write value name or press enter to use array instead)\n").strip()
-                    if key_by_value == '': key_by_value = False
-                
-                if key_by_value:
-                    json_map[item_name] = {}
-                else:
-                    json_map[item_name] = []
-                json_map_entry = json_map[item_name]
-            else:
-                dup=1
-                while json_map.get(f"{item_name}_{dup}", False): dup+=1
-                
-                if key_by_value: json_map[f"{item_name}_{dup}"] = {}
-                else: json_map[f"{item_name}_{dup}"] = []
-                json_map_entry = json_map[f"{item_name}_{dup}"]
+                    schema_dict[next_item_name] = data_schema
+
+                    values = [
+                        entry.get("Value")
+                        for entry in next_item.get("Values", [])
+                    ]
+                    preview_map = build_value_map(values, data_schema)
+                    active_key_field = configure_key_by_value(
+                        next_item_name, preview_map
+                    )
+
+            key_fields[item_name] = active_key_field
+        else:
+            # Repeated blocks reuse the key field selected for this marker.
+            active_key_field = key_fields[item_name]
+
+        # Keep repeated blocks separate, as the original script intended.
+        output_name = item_name
+        duplicate_index = 1
+        while output_name in json_map:
+            output_name = f"{item_name}_{duplicate_index}"
+            duplicate_index += 1
+
+        json_map[output_name] = {} if active_key_field else []
+        json_map_entry = json_map[output_name]
+
+    # Also validate the final block in files that omit a closing marker.
+    if entry_len["original"] != entry_len["actual"]:
+        print(
+            f"{entry_len['item_name']} length: {entry_len['actual']}\n"
+            f"does not match json length: {entry_len['original']}"
+        )
+        return None
+
     return json_map
-            
+
 def main():
     load_settings()    
 
@@ -353,7 +461,9 @@ Input: """))
                 
                 # CONFIG["OUTPUT_PATH"] = DATA_DIR / json_file    
                 if json_map:
-                    with open(CONFIG["OUTPUT_PATH"] / json_file, "w", encoding="utf-8") as f:
+                    output_file = CONFIG["OUTPUT_PATH"] / json_file
+                    output_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(output_file, "w", encoding="utf-8") as f:
                         json.dump(
                             json_map,
                             f,
