@@ -1307,7 +1307,7 @@ YW2 [
 		BattleCommandID|True
 		NounTextID|True
 		AnimSpeed?|False
-		TriggerCategory\ID|True
+		TriggerCategory|False
 		EffectBehaviourBitMask|True
 		HitsPerTarget\ID|False
 		SoultimateCancelChance(?)|False
@@ -2150,7 +2150,7 @@ YW2 [
 
 	BTL_ONLINE_BGM_INFO (
 		MusIDA?|True
-		UnkIDB|True
+		MatchingMenuTextID|True
 	)
 
 	BTL_ONLINE_BGM_INFO_LIST_BEG (
@@ -2192,7 +2192,7 @@ YW2 [
 		UnkNumC|False
 		UnkBool?|False
 		Unk14|False
-		Unk15|False
+		Unk15|True
 	)
 
 	BTL_RULE_INFO_RULE_DATA_LIST_BEG (
@@ -3436,8 +3436,8 @@ YW2 [
 		MapID|True
 		Unk1|False
 		MapType|False
-		Unk3|False
-		Unk4|False
+		MapNumber|False
+		MapVariant?|False
 		Unk5|False
 		Unk6|False
 		Unk7|False
